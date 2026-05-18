@@ -1,12 +1,35 @@
 #!/bin/bash
-# XFCE panel widget for Claude Code token usage
-# Usage: configure as "Generic Monitor" (xfce4-genmon-plugin) command
+# Panel widget for Claude Code token usage
+# Auto-detects output format: genmon (XFCE) or CommandRunner XML (Cinnamon)
+
+detect_de() {
+    case "${XDG_CURRENT_DESKTOP:-}" in
+        *Cinnamon*|*X-Cinnamon*) echo "cinnamon"; return ;;
+        *XFCE*) echo "genmon"; return ;;
+    esac
+    case "${GDMSESSION:-}" in
+        cinnamon) echo "cinnamon"; return ;;
+        xfce) echo "genmon"; return ;;
+    esac
+    pgrep -u "$USER" -x cinnamon-session >/dev/null 2>&1 && echo "cinnamon" && return
+    pgrep -u "$USER" -x xfce4-session >/dev/null 2>&1 && echo "genmon" && return
+    echo "genmon"
+}
+MODE=$(detect_de)
 
 CONFIG_FILE="$HOME/.claude/.credentials.json"
 CACHE_FILE="/tmp/claude-usage-cache.txt"
 STATUS_CACHE="/tmp/claude-status-cache.txt"
 CACHE_TTL=55
 ICON="$HOME/.local/share/icons/claude/claude-robot.png"
+
+xml_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    echo "$s"
+}
 
 get_token() {
     grep -o '"accessToken":"[^"]*"' "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f4
@@ -267,10 +290,68 @@ if [ -n "$maint_name" ] && [ -n "$maint_iso" ]; then
     fi
 fi
 
-[ -f "$ICON" ] && echo "<img>$ICON</img>"
-echo "<txt><span foreground='$ap_hex'>●</span> <span foreground='$s5_hex'>🜁 ${session_pct}%</span><span foreground='gray'> ${sr_human}</span><span foreground='gray'> | </span><span foreground='$s7_hex'>🜃 ${weekly_pct}%</span></txt>"
-echo "<tool>Sessão (5h): ${session_pct}% — reseta ${sr_when} (em ${sr_human})
+if [ "$MODE" = "cinnamon" ]; then
+    tooltip_val="Sessão (5h): ${session_pct}% — reseta ${sr_when} (em ${sr_human})
+Semanal (7d): ${weekly_pct}% — reseta ${wr_when} (em ${wr_human})${model_lines}
+Status conta: ${status_pt}${status_icon}
+${status_block}"
+    tooltip_val=$(xml_escape "$tooltip_val")
+    echo '<xml>'
+    echo '  <appsettings>'
+    echo "    <tooltip>${tooltip_val}</tooltip>"
+    echo '    <clickaction>xdg-open https://claude.ai/settings/usage</clickaction>'
+    echo '  </appsettings>'
+    echo '  <item>'
+    echo '    <type>box</type>'
+    if [ -f "$ICON" ]; then
+        echo '    <item>'
+        echo '      <type>icon</type>'
+        echo "      <value>$(xml_escape "$ICON")</value>"
+        echo '    </item>'
+    fi
+    echo '    <item>'
+    echo '      <type>text</type>'
+    echo "      <value>●</value>"
+    echo '      <attr>'
+    echo "        <style>color: ${ap_hex};</style>"
+    echo '      </attr>'
+    echo '    </item>'
+    echo '    <item>'
+    echo '      <type>text</type>'
+    echo "      <value> 🜁 $(xml_escape "${session_pct}%")</value>"
+    echo '      <attr>'
+    echo "        <style>color: ${s5_hex};</style>"
+    echo '      </attr>'
+    echo '    </item>'
+    echo '    <item>'
+    echo '      <type>text</type>'
+    echo "      <value> $(xml_escape "${sr_human}")</value>"
+    echo '      <attr>'
+    echo '        <style>color: gray;</style>'
+    echo '      </attr>'
+    echo '    </item>'
+    echo '    <item>'
+    echo '      <type>text</type>'
+    echo '      <value> | </value>'
+    echo '      <attr>'
+    echo '        <style>color: gray;</style>'
+    echo '      </attr>'
+    echo '    </item>'
+    echo '    <item>'
+    echo '      <type>text</type>'
+    echo "      <value> 🜃 $(xml_escape "${weekly_pct}%")</value>"
+    echo '      <attr>'
+    echo "        <style>color: ${s7_hex};</style>"
+    echo '      </attr>'
+    echo '    </item>'
+    echo '  </item>'
+    echo '</xml>'
+else
+    [ -f "$ICON" ] && echo "<img>$ICON</img>"
+    echo "<txt><span foreground='$ap_hex'>●</span> <span foreground='$s5_hex'>🜁 ${session_pct}%</span><span foreground='gray'> ${sr_human}</span><span foreground='gray'> | </span><span foreground='$s7_hex'>🜃 ${weekly_pct}%</span></txt>"
+    echo "<tool>Sessão (5h): ${session_pct}% — reseta ${sr_when} (em ${sr_human})
 Semanal (7d): ${weekly_pct}% — reseta ${wr_when} (em ${wr_human})${model_lines}
 Status conta: ${status_pt}${status_icon}
 ${status_block}</tool>"
-echo "<txtclick>xdg-open https://claude.ai/settings/usage</txtclick>"
+    echo "<txtclick>xdg-open https://claude.ai/settings/usage</txtclick>"
+fi

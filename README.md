@@ -1,6 +1,8 @@
 # claude-usage-panel
 
-Widget para o painel do **XFCE** (Linux Mint, Xubuntu, etc) que mostra o uso de tokens do **Claude Code** em tempo real — sessão de 5h, cota semanal de 7d, status da conta e status da Anthropic.
+Widget para o painel do **XFCE** ou **Cinnamon** (Linux Mint) que mostra o uso de tokens do **Claude Code** em tempo real — sessão de 5h, cota semanal de 7d, status da conta e status da Anthropic.
+
+> Detecta automaticamente o ambiente (Cinnamon ou XFCE) e formata a saída para o applet correto.
 
 ![preview]( <!-- coloque um print aqui depois --> )
 
@@ -31,6 +33,17 @@ Quando há incidente ativo, aparece também o nome e a última atualização. Qu
 
 Click esquerdo → abre `claude.ai/settings/usage`.
 
+## Detecção automática
+
+O script detecta o ambiente automaticamente:
+
+| Desktop | Formato de saída | Applet necessário |
+|---|---|---|
+| XFCE | Genmon (`<txt>`, `<tool>`, `<img>`) | `xfce4-genmon-plugin` |
+| Cinnamon | XML (`CommandRunner@appdevsw`) | `CommandRunner` (Cinnamon Spices) |
+
+A detecção usa `$XDG_CURRENT_DESKTOP`, `$GDMSESSION`, e `pgrep` como fallback.
+
 ## Como funciona
 
 Lê o token OAuth de `~/.claude/.credentials.json` (o mesmo que o `claude` CLI usa) e chama dois endpoints:
@@ -45,7 +58,9 @@ Cache local em `/tmp/` por 55s para evitar excesso de requests (o `genmon` costu
 ### 1. Dependências
 
 ```bash
-sudo apt install xfce4-genmon-plugin curl python3
+sudo apt install xfce4-genmon-plugin curl python3   # XFCE
+# ou
+sudo apt install curl python3                        # Cinnamon + CommandRunner applet (GUI)
 ```
 
 ### 2. Coloque o script onde quiser
@@ -68,7 +83,9 @@ curl -sL "https://claude.ai/favicon.svg" -o /tmp/claude.svg
 inkscape /tmp/claude.svg -w 24 -h 24 -o ~/.local/share/icons/claude/claude-robot.png
 ```
 
-### 4. Adicione ao painel XFCE
+### 4. Adicione ao painel
+
+#### XFCE
 
 1. Clique direito no painel → *Painel* → *Adicionar novos itens…*
 2. Selecione **Generic Monitor**.
@@ -77,6 +94,15 @@ inkscape /tmp/claude.svg -w 24 -h 24 -o ~/.local/share/icons/claude/claude-robot
    - **Period (seconds)**: `60`
    - **Label**: desmarcado
    - **Use a font**: opcional
+
+#### Cinnamon
+
+1. Clique direito no painel → *Applets* → aba *Download* → procure **CommandRunner** → instale.
+2. Na aba *Installed*, selecione **CommandRunner** → ➕ (Add to panel).
+3. Clique direito no applet novo → *Configure*:
+   - **Command**: `bash /caminho/para/claude-usage-panel.sh`
+   - **Run interval**: `60` (seconds)
+   - **Click Command**: `xdg-open https://claude.ai/settings/usage`
 
 ## Personalização
 
