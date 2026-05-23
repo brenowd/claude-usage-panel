@@ -35,6 +35,25 @@ get_token() {
     grep -o '"accessToken":"[^"]*"' "$CONFIG_FILE" 2>/dev/null | cut -d'"' -f4
 }
 
+get_account_info() {
+    python3 - <<'PY'
+import json, os
+path = os.path.expanduser('~/.claude.json')
+try:
+    with open(path) as f:
+        d = json.load(f)
+    acc = d.get('oauthAccount') or {}
+    email = acc.get('emailAddress', '')
+    name  = acc.get('displayName', '')
+    tier  = (d.get('claudeAiOauth') or {}).get('subscriptionType', '')
+    print(f"acct_email={email}")
+    print(f"acct_name={name}")
+    print(f"acct_tier={tier}")
+except Exception:
+    print("acct_email="); print("acct_name="); print("acct_tier=")
+PY
+}
+
 fetch_usage() {
     local token
     token=$(get_token) || return 1
@@ -234,6 +253,8 @@ case "$inc_impact" in
     critical) ap_hex='#e06c75' ;;
 esac
 
+eval "$(get_account_info)"
+
 session_pct=$s5h_pct
 weekly_pct=$s7d_pct
 sr_human=$(human_duration "$s5h_min")
@@ -290,10 +311,17 @@ if [ -n "$maint_name" ] && [ -n "$maint_iso" ]; then
     fi
 fi
 
+acct_line=""
+if [ -n "$acct_email" ]; then
+    acct_line="
+Conta: ${acct_email}"
+    [ -n "$acct_tier" ] && acct_line+=" (${acct_tier})"
+fi
+
 if [ "$MODE" = "cinnamon" ]; then
     tooltip_val="Sessão (5h): ${session_pct}% — reseta ${sr_when} (em ${sr_human})
 Semanal (7d): ${weekly_pct}% — reseta ${wr_when} (em ${wr_human})${model_lines}
-Status conta: ${status_pt}${status_icon}
+Status conta: ${status_pt}${status_icon}${acct_line}
 ${status_block}"
     tooltip_val=$(xml_escape "$tooltip_val")
     echo '<xml>'
@@ -351,7 +379,7 @@ else
     echo "<txt><span foreground='$ap_hex'>●</span> <span foreground='$s5_hex'>🜁 ${session_pct}%</span><span foreground='gray'> ${sr_human}</span><span foreground='gray'> | </span><span foreground='$s7_hex'>🜃 ${weekly_pct}%</span></txt>"
     echo "<tool>Sessão (5h): ${session_pct}% — reseta ${sr_when} (em ${sr_human})
 Semanal (7d): ${weekly_pct}% — reseta ${wr_when} (em ${wr_human})${model_lines}
-Status conta: ${status_pt}${status_icon}
+Status conta: ${status_pt}${status_icon}${acct_line}
 ${status_block}</tool>"
     echo "<txtclick>xdg-open https://claude.ai/settings/usage</txtclick>"
 fi
