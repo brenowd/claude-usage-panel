@@ -91,6 +91,19 @@ field('s7d',  body.get('seven_day'))
 field('opus', body.get('seven_day_opus'))
 field('sonn', body.get('seven_day_sonnet'))
 
+# Per-model weekly quotas (new API shape: limits[] with kind=weekly_scoped)
+i = 0
+for lim in body.get('limits') or []:
+    scope = lim.get('scope') or {}
+    model = (scope.get('model') or {}).get('display_name')
+    if lim.get('kind') == 'weekly_scoped' and model and lim.get('percent') is not None:
+        i += 1
+        safe = str(model).replace("'", "'\\''")
+        out.append(f"m{i}_name='{safe}'")
+        out.append(f"m{i}_pct={int(round(lim['percent']))}")
+        out.append(f"m{i}_min={iso_to_min(lim.get('resets_at'))}")
+out.append(f"m_count={i}")
+
 xu = body.get('extra_usage') or {}
 out.append(f"extra_on={'1' if xu.get('is_enabled') else '0'}")
 out.append(f"extra_pct={int(round(xu['utilization'])) if xu.get('utilization') is not None else ''}")
@@ -290,6 +303,11 @@ model_lines=""
 Opus (7d): ${opus_pct}% — reseta $(human_when "$opus_min")"
 [ -n "$sonn_pct" ] && model_lines+="
 Sonnet (7d): ${sonn_pct}% — reseta $(human_when "$sonn_min")"
+for _i in $(seq 1 "${m_count:-0}"); do
+    eval "_name=\$m${_i}_name _pct=\$m${_i}_pct _min=\$m${_i}_min"
+    [ -n "$_pct" ] && model_lines+="
+${_name} (7d): ${_pct}% — reseta $(human_when "$_min")"
+done
 [ "$extra_on" = "1" ] && [ -n "$extra_pct" ] && model_lines+="
 Créditos extra: ${extra_pct}%"
 
