@@ -20,8 +20,17 @@ MODE=$(detect_de)
 CONFIG_FILE="$HOME/.claude/.credentials.json"
 CACHE_FILE="/tmp/claude-usage-cache.txt"
 STATUS_CACHE="/tmp/claude-status-cache.txt"
+HISTORY_FILE="/tmp/claude-usage-history.txt"
+NOTIFY_STATE="/tmp/claude-usage-notify.txt"
+AUTH_FAIL_FILE="/tmp/claude-usage-authfail"
 CACHE_TTL=55
 ICON="$HOME/.local/share/icons/claude/claude-robot.png"
+
+# "claude-usage-panel.sh refresh" força nova busca no próximo ciclo
+if [ "${1:-}" = "refresh" ]; then
+    rm -f "$CACHE_FILE" "$STATUS_CACHE"
+    exit 0
+fi
 
 xml_escape() {
     local s="$1"
@@ -58,15 +67,22 @@ fetch_usage() {
     local token
     token=$(get_token) || return 1
 
-    local body
-    body=$(curl -s --max-time 5 "https://api.anthropic.com/api/oauth/usage" \
+    local resp body code
+    resp=$(curl -s --max-time 5 -w $'\n%{http_code}' "https://api.anthropic.com/api/oauth/usage" \
         -H "Authorization: Bearer $token" \
         -H "anthropic-version: 2023-06-01" \
         -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null) || return 1
+    code="${resp##*$'\n'}"
+    body="${resp%$'\n'*}"
+    if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+        touch "$AUTH_FAIL_FILE"
+        return 1
+    fi
+    rm -f "$AUTH_FAIL_FILE"
     [ -z "$body" ] && return 1
     echo "$body" | grep -q '"five_hour"' || return 1
 
-    python3 - "$body" "$CACHE_FILE" <<'PY'
+    python3 - "$body" "$CACHE_FILE" "$HISTORY_FILE" <<'PY'
 import json, sys, time, datetime
 body = json.loads(sys.argv[1])
 cache = sys.argv[2]
@@ -103,6 +119,78 @@ for lim in body.get('limits') or []:
         out.append(f"m{i}_pct={int(round(lim['percent']))}")
         out.append(f"m{i}_min={iso_to_min(lim.get('resets_at'))}")
 out.append(f"m_count={i}")
+
+# Severity reported by the API + highest weekly limit (geral ou por modelo)
+sev = {}
+wk_pct = wk_min = None
+wk_label, wk_sev = '', 'normal'
+for lim in body.get('limits') or []:
+    pct = lim.get('percent')
+    if pct is None:
+        continue
+    if lim.get('kind') == 'session':
+        sev['s5h'] = lim.get('severity') or 'normal'
+    if lim.get('group') == 'weekly':
+        if lim.get('kind') == 'weekly_all':
+            sev['s7d'] = lim.get('severity') or 'normal'
+        if wk_pct is None or pct > wk_pct:
+            wk_pct = pct
+            wk_min = iso_to_min(lim.get('resets_at'))
+            wk_sev = lim.get('severity') or 'normal'
+            model = ((lim.get('scope') or {}).get('model') or {}).get('display_name')
+            wk_label = str(model) if model else ''
+out.append(f"s5h_sev={sev.get('s5h', 'normal')}")
+out.append(f"s7d_sev={sev.get('s7d', 'normal')}")
+out.append(f"wk_pct={'' if wk_pct is None else int(round(wk_pct))}")
+out.append(f"wk_min={'' if wk_min is None else wk_min}")
+out.append("wk_label='" + wk_label.replace("'", "'\\''") + "'")
+out.append(f"wk_sev={wk_sev}")
+
+# Spend / usage credits
+sp = body.get('spend') or {}
+used = sp.get('used') or {}
+amt, exp, cur = used.get('amount_minor'), used.get('exponent', 2), used.get('currency', 'USD')
+if sp.get('enabled') and amt is not None:
+    out.append("spend_on=1")
+    out.append(f"spend_str='{amt / (10 ** exp):.2f} {cur}'")
+    out.append(f"spend_pct={int(round(sp.get('percent') or 0))}")
+else:
+    out.append("spend_on=0"); out.append("spend_str="); out.append("spend_pct=")
+
+# Burn rate: keep 1h of session samples, estimate minutes until 100%
+hist = sys.argv[3]
+now = int(time.time())
+s5_pct = (body.get('five_hour') or {}).get('utilization')
+samples = []
+try:
+    with open(hist) as f:
+        for ln in f:
+            p = ln.split()
+            if len(p) == 2:
+                samples.append((int(p[0]), float(p[1])))
+except Exception:
+    pass
+eta = ''
+if s5_pct is not None:
+    samples.append((now, float(s5_pct)))
+    samples = [s for s in samples if now - s[0] <= 3600][-60:]
+    try:
+        with open(hist, 'w') as f:
+            f.writelines(f"{t} {p}\n" for t, p in samples)
+    except Exception:
+        pass
+    # slope over the contiguous non-decreasing tail (ignores samples before a reset)
+    tail = [samples[-1]]
+    for s in reversed(samples[:-1]):
+        if s[1] <= tail[0][1]:
+            tail.insert(0, s)
+        else:
+            break
+    dt = now - tail[0][0]
+    dp = float(s5_pct) - tail[0][1]
+    if dt >= 300 and dp > 0.5 and s5_pct < 100:
+        eta = str(int((100 - float(s5_pct)) / (dp / dt) // 60))
+out.append(f"burn_eta_min={eta}")
 
 xu = body.get('extra_usage') or {}
 out.append(f"extra_on={'1' if xu.get('is_enabled') else '0'}")
@@ -212,9 +300,13 @@ human_when() {
     fi
 }
 
-# Determine color based on percentage
+# Determine color: API severity wins; falls back to percentage thresholds
 colorize() {
-    local pct=$1
+    local pct=$1 sev=${2:-normal}
+    case "$sev" in
+        *exceed*|*critical*|*reject*|*limit*) echo "red"; return ;;
+        *warn*|*elevated*)                    echo "orange"; return ;;
+    esac
     if [ "$pct" -ge 80 ]; then echo "red"
     elif [ "$pct" -ge 50 ]; then echo "orange"
     else echo "green"
@@ -223,12 +315,14 @@ colorize() {
 
 # Use cache if fresh enough
 HAVE_DATA=false
+FRESH=false
 load_cache() { . "$CACHE_FILE" 2>/dev/null && HAVE_DATA=true; }
 if [ -f "$CACHE_FILE" ] && [ $(( $(date +%s) - $(stat -c %Y "$CACHE_FILE") )) -lt $CACHE_TTL ]; then
     load_cache
 else
     if fetch_usage >/dev/null; then
         load_cache
+        FRESH=true
     elif [ -f "$CACHE_FILE" ]; then
         load_cache
     fi
@@ -236,8 +330,13 @@ fi
 
 if [ "$HAVE_DATA" = false ]; then
     [ -f "$ICON" ] && echo "<img>$ICON</img>"
-    echo "<txt><span foreground='gray'>--</span></txt>"
-    echo "<tool>Falha ao buscar uso</tool>"
+    if [ -f "$AUTH_FAIL_FILE" ]; then
+        echo "<txt><span foreground='#e06c75'>⟳ login</span></txt>"
+        echo "<tool>Token expirado — rode 'claude' no terminal para reautenticar</tool>"
+    else
+        echo "<txt><span foreground='gray'>--</span></txt>"
+        echo "<tool>Falha ao buscar uso</tool>"
+    fi
     exit 0
 fi
 
@@ -275,8 +374,30 @@ wr_human=$(human_duration "$s7d_min")
 sr_when=$(human_when "$s5h_min")
 wr_when=$(human_when "$s7d_min")
 
-s5_color=$(colorize "$session_pct")
-s7_color=$(colorize "$weekly_pct")
+# Panel weekly indicator: highest weekly limit (geral or per-model), so a
+# scoped model quota about to run out isn't hidden behind the overall one
+panel_wk_pct=${wk_pct:-$s7d_pct}
+panel_wk_min=${wk_min:-$s7d_min}
+panel_wk_human=$(human_duration "$panel_wk_min")
+
+s5_color=$(colorize "$session_pct" "$s5h_sev")
+s7_color=$(colorize "$panel_wk_pct" "${wk_sev:-$s7d_sev}")
+
+# Desktop notifications on threshold crossings (only on fresh data)
+if [ "$FRESH" = true ] && command -v notify-send >/dev/null 2>&1 && [ -n "$session_pct" ]; then
+    prev=""
+    [ -f "$NOTIFY_STATE" ] && prev=$(cat "$NOTIFY_STATE" 2>/dev/null)
+    echo "$session_pct" > "$NOTIFY_STATE"
+    if [ -n "$prev" ]; then
+        if [ "$prev" -lt 95 ] && [ "$session_pct" -ge 95 ]; then
+            notify-send -u critical -i "$ICON" "Claude Code" "Sessão em ${session_pct}% do limite — reseta ${sr_when}"
+        elif [ "$prev" -lt 80 ] && [ "$session_pct" -ge 80 ]; then
+            notify-send -u normal -i "$ICON" "Claude Code" "Sessão em ${session_pct}% do limite — reseta ${sr_when}"
+        elif [ "$prev" -ge 80 ] && [ "$session_pct" -lt $(( prev - 30 )) ]; then
+            notify-send -u low -i "$ICON" "Claude Code" "Quota da sessão liberada (${session_pct}%)"
+        fi
+    fi
+fi
 
 # Map color names to hex
 case "$s5_color" in
@@ -310,9 +431,15 @@ ${_name} (7d): ${_pct}% — reseta $(human_when "$_min")"
 done
 [ "$extra_on" = "1" ] && [ -n "$extra_pct" ] && model_lines+="
 Créditos extra: ${extra_pct}%"
+[ "$spend_on" = "1" ] && model_lines+="
+Créditos: ${spend_str} usados (${spend_pct}%)"
+[ -n "$burn_eta_min" ] && model_lines+="
+No ritmo atual, sessão esgota em ~$(human_duration "$burn_eta_min")"
 
 # Status lines for tooltip
 status_block="Claude Code: ${cc_pt}"
+[ -f "$AUTH_FAIL_FILE" ] && status_block+="
+⚠ Token expirado — dados podem estar desatualizados"
 if [ -n "$inc_name" ]; then
     status_block+="
 ⚠ Incidente: ${inc_name}"
@@ -385,7 +512,7 @@ ${status_block}"
     echo '    </item>'
     echo '    <item>'
     echo '      <type>text</type>'
-    echo "      <value> 🜃 $(xml_escape "${weekly_pct}%")</value>"
+    echo "      <value> 🜃 $(xml_escape "${panel_wk_pct}%")</value>"
     echo '      <attr>'
     echo "        <style>color: ${s7_hex};</style>"
     echo '      </attr>'
@@ -394,7 +521,7 @@ ${status_block}"
     echo '</xml>'
 else
     [ -f "$ICON" ] && echo "<img>$ICON</img>"
-    echo "<txt><span foreground='$ap_hex'>●</span> <span foreground='$s5_hex'>🜁 ${session_pct}%</span><span foreground='gray'> ${sr_human}</span><span foreground='gray'> | </span><span foreground='$s7_hex'>🜃 ${weekly_pct}%</span></txt>"
+    echo "<txt><span foreground='$ap_hex'>●</span> <span foreground='$s5_hex'>🜁 ${session_pct}%</span><span foreground='gray'> ${sr_human}</span><span foreground='gray'> | </span><span foreground='$s7_hex'>🜃 ${panel_wk_pct}%</span></txt>"
     echo "<tool>Sessão (5h): ${session_pct}% — reseta ${sr_when} (em ${sr_human})
 Semanal (7d): ${weekly_pct}% — reseta ${wr_when} (em ${wr_human})${model_lines}
 Status conta: ${status_pt}${status_icon}${acct_line}

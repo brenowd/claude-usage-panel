@@ -17,21 +17,43 @@ No painel:
 - **🤖** — pixel-art do [claudepix](https://claudepix.vercel.app)
 - **●** — bolinha colorida com o status do componente "Claude Code" na [status page da Anthropic](https://status.anthropic.com)
 - **🜁** — utilização da janela de 5h, com tempo até o reset
-- **🜃** — utilização da janela de 7d
-- Cores: verde <50%, laranja 50–80%, vermelho ≥80%
+- **🜃** — o **maior** limite semanal (geral ou por modelo, ex. Fable) — assim uma cota de modelo prestes a estourar não fica escondida atrás da geral
+- Cores: severidade reportada pela API quando disponível; senão verde <50%, laranja 50–80%, vermelho ≥80%
 
 No tooltip:
 
 ```
 Sessão (5h): 53% — reseta hoje às 14:49 (em 4h 17m)
 Semanal (7d): 11% — reseta ter 19/05 às 10:59 (em 3d 0h)
+Fable (7d): 3% — reseta ter 19/05 às 10:59
+No ritmo atual, sessão esgota em ~1h 10m
 Status conta: permitido
 Claude Code: Operacional
 ```
 
+- Cotas semanais **por modelo** (Fable, etc.) aparecem automaticamente conforme a API as reporta.
+- **Burn rate**: com ≥5 min de histórico na sessão, estima quando a janela de 5h esgota no ritmo atual.
+- Créditos extra / spend aparecem quando habilitados na conta.
+
 Quando há incidente ativo, aparece também o nome e a última atualização. Quando há manutenção agendada nas próximas 24h, aparece o horário.
 
 Click esquerdo → abre `claude.ai/settings/usage`.
+
+## Notificações
+
+Se `notify-send` estiver disponível, o widget dispara notificações de desktop ao cruzar limiares da sessão de 5h:
+
+- **≥80%** — aviso normal
+- **≥95%** — aviso crítico
+- **reset detectado** (queda ≥30 pontos vindo de ≥80%) — "quota liberada"
+
+## Forçar atualização
+
+```bash
+bash claude-usage-panel.sh refresh
+```
+
+Limpa os caches; a próxima execução do applet busca dados novos. Se o token OAuth expirar, o widget mostra `⟳ login` — reautentique rodando `claude` no terminal.
 
 ## Detecção automática
 
